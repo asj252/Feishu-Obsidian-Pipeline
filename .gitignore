@@ -1,0 +1,43 @@
+# ==========================================================
+# 專案程式碼與腳本開發 .gitignore
+# 僅追蹤代碼 (Scripts/)、規格文檔與模板，排除敏感金鑰與個人筆記數據
+# ==========================================================
+
+# 1. 嚴格忽略敏感金鑰、憑證與環境設定 (開源安全禁止提交)
+.env
+*.env
+.env.local
+.env.*
+cookies.txt
+*.cookies
+*.sqlite
+*.db
+
+# 2. Python 執行暫存與快取
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+*.log
+
+# 3. 媒體與暫存音訊下載
+*.m4a
+*.mp3
+*.webm
+*.ogg
+*.wav
+*.tmp
+
+# 4. OneDrive 衝突複本
+*-Conflicted Copy.*
+
+# 5. Obsidian 內部高頻變動工作區 (防止多端同步衝突)
+.obsidian/
+
+# 6. 個人閱讀筆記與動態數據庫 (交由 OneDrive 實時同步，不混入代碼版本庫)
+Knowledge_Logs/
+Transcripts/
+Classical_Music/
+Dashboards/
+Inbox_Pending.md
