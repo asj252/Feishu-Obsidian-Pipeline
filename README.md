@@ -54,7 +54,7 @@ flowchart TD
             Rule5Check["嚴格校驗：<br/>1. 海外關鍵字識別<br/>2. 時長誤差 ±15%<br/>3. 語意相似度"]
             Rule5Gemini["YouTube 原片字幕補全精讀<br/>(Rule 5)"]
             
-            Tier2{"Tier 2: 時長 <= 30分鐘?<br/>(download_audio_stream)"}
+            Tier2{"Tier 2: 音訊多模態篩選<br/>(download_audio_stream)"}
             Tier2Gemini["Gemini 原生音訊多模態聽音<br/>(Level 3 Base64 Inline)"]
             
             Tier3Gemini["結構化元數據 + 知識圖譜深潛<br/>+ 長視頻擴展逐字稿生成 (Level 1)"]
@@ -72,17 +72,18 @@ flowchart TD
     UserPC -->|發送影片網址| FeishuWS
     FeishuWS --> Dispatcher
     Dispatcher --> PlaylistRouter
-    PlaylistRouter -->|單集 / 帶?p=網址| MetaExtractor
+    PlaylistRouter -->|單集或指定分P| MetaExtractor
     PlaylistRouter -->|未指定分P的多P課程| InteractiveMenu
     InteractiveMenu -->|用戶回覆選擇| Dispatcher
 
     MetaExtractor --> Tier1
     Tier1 -->|命中字幕軌| Tier1Gemini
     Tier1 -->|無字幕| Rule5
-    Rule5 -->|通過嚴格校驗| Rule5Check --> Rule5Gemini
-    Rule5 -->|本土原創 / 校驗失敗| Tier2
-    Tier2 -->|<= 30 分鐘| Tier2Gemini
-    Tier2 -->|> 30 分鐘| Tier3Gemini
+    Rule5 -->|通過嚴格校驗| Rule5Check
+    Rule5Check --> Rule5Gemini
+    Rule5 -->|本土原創或校驗未通過| Tier2
+    Tier2 -->|30 分鐘以內| Tier2Gemini
+    Tier2 -->|超過 30 分鐘| Tier3Gemini
 
     Tier1Gemini --> MonthlyLog
     Rule5Gemini --> MonthlyLog
@@ -104,46 +105,47 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start([收到影片網址]) --> ExtractMeta[抓取元數據: 標題 / 頻道 / 時長]
-    ExtractMeta --> CheckPlatform{影片平台判斷}
+    Start([收到影片網址]) --> ExtractMeta["抓取元數據: 標題 / 頻道 / 時長"]
+    ExtractMeta --> CheckPlatform{"影片平台判斷"}
     
-    CheckPlatform -->|YouTube| FetchYtSub[提取官方/自動字幕軌]
-    CheckPlatform -->|Bilibili| FetchBiliSub[提取 B站字幕軌]
+    CheckPlatform -->|YouTube| FetchYtSub["提取官方 / 自動字幕軌"]
+    CheckPlatform -->|Bilibili| FetchBiliSub["提取 B站字幕軌"]
     
-    FetchYtSub --> SubFound{是否有有效字幕?}
+    FetchYtSub --> SubFound{"是否有有效字幕？"}
     FetchBiliSub --> SubFound
     
-    SubFound -->|是| PromptTier1[啟動 Level 2: 字幕逐字稿深度精讀]
-    SubFound -->|否 (B站)| CheckForeign{是否具備海外轉載特徵?<br/>Stanford, MIT, TED, 雙語...}
-    SubFound -->|否 (YouTube)| CheckDuration
+    SubFound -->|是| PromptTier1["啟動 Level 2: 字幕逐字稿深度精讀"]
+    SubFound -->|否 - B站| CheckForeign{"是否具備海外轉載特徵？<br/>(Stanford, MIT, TED, 雙語...)"}
+    SubFound -->|否 - YouTube| CheckDuration{"時長是否在 30 分鐘以內？"}
     
-    CheckForeign -->|是| SearchYT[在 YouTube 反向檢索候選影片]
-    CheckForeign -->|否: 判定為本土原創| CheckDuration{時長 <= 30分鐘?}
+    CheckForeign -->|是| SearchYT["在 YouTube 反向檢索候選影片"]
+    CheckForeign -->|否 - 判定為本土原創| CheckDuration
     
-    SearchYT --> VerifyMatch{候選影片時長誤差 <= 15%?}
-    VerifyMatch -->|通過| FetchYTOriginalSub[獲取 YouTube 原片字幕]
+    SearchYT --> VerifyMatch{"候選影片時長誤差 <= 15%？"}
+    VerifyMatch -->|通過| FetchYTOriginalSub["獲取 YouTube 原片字幕"]
     VerifyMatch -->|未通過| CheckDuration
     
-    FetchYTOriginalSub --> HasOrigSub{原片是否有字幕?}
-    HasOrigSub -->|是| PromptRule5[啟動 Rule 5: 跨平台同源字幕補全精讀]
+    FetchYTOriginalSub --> HasOrigSub{"原片是否有字幕？"}
+    HasOrigSub -->|是| PromptRule5["啟動 Rule 5: 跨平台同源字幕補全精讀"]
     HasOrigSub -->|否| CheckDuration
     
-    CheckDuration -->|是| DownloadAudio[抽取輕量 M4A 音訊流]
-    CheckDuration -->|否| PromptTier3[啟動 Level 1: 結構化元數據精讀]
+    CheckDuration -->|是| DownloadAudio["抽取輕量 M4A 音訊流"]
+    CheckDuration -->|否| PromptTier3["啟動 Level 1: 結構化元數據精讀"]
     
-    DownloadAudio --> GeminiAudio[Gemini Flash 原生多模態聽音解析]
-    GeminiAudio --> PromptTier2[啟動 Level 3: 語音多模態精讀]
+    DownloadAudio --> GeminiAudio["Gemini Flash 原生多模態聽音解析"]
+    GeminiAudio --> PromptTier2["啟動 Level 3: 語音多模態精讀"]
     
-    PromptTier1 --> CheckLong{時長 >= 20 分鐘?}
+    PromptTier1 --> CheckLong{"時長是否超過 20 分鐘？"}
     PromptRule5 --> CheckLong
     PromptTier2 --> CheckLong
-    PromptTier3 --> GenDeepTrans[調用 Gemini 擴展生成章節詳細逐字稿] --> CheckLong
+    PromptTier3 --> GenDeepTrans["調用 Gemini 擴展生成章節詳細逐字稿"]
+    GenDeepTrans --> CheckLong
     
-    CheckLong -->|是| SaveTranscript[寫入 Transcripts/YYYY-MM/ 獨立逐字稿檔案]
-    CheckLong -->|否| SaveMonthly[原子追加寫入月度長日誌流]
+    CheckLong -->|是| SaveTranscript["寫入 Transcripts/YYYY-MM/ 獨立逐字稿檔案"]
+    CheckLong -->|否| SaveMonthly["原子追加寫入月度長日誌流"]
     
     SaveTranscript --> SaveMonthly
-    SaveMonthly --> ReplyFeishu[回傳飛書卡片: 成功通知 + 雙鏈路徑]
+    SaveMonthly --> ReplyFeishu["回傳飛書卡片: 成功通知 + 雙鏈路徑"]
     ReplyFeishu --> Done([流程結束])
 ```
 
@@ -175,10 +177,10 @@ sequenceDiagram
             Ext-->>Bot: 返回真實作者與精確時長
         end
 
-        alt 命中字幕 (Tier 1 / Rule 5)
+        alt 命中字幕 (Tier 1 或 Rule 5)
             Bot->>Gemini: 發送 30,000 字字幕逐字稿 + 提示詞
             Gemini-->>Bot: 返回核心論點、時間戳速記、深度分析
-        else 時長 <= 30m 語音 (Tier 2)
+        else 時長 30 分鐘以內語音 (Tier 2)
             Bot->>Ext: 下載輕量 M4A 音訊
             Bot->>Gemini: 發送 Base64 音訊數據 (Multimodal Inline)
             Gemini-->>Bot: 返回原生聽音筆記與精確時戳
@@ -187,14 +189,14 @@ sequenceDiagram
             Gemini-->>Bot: 返回深度架構筆記與逐字稿
         end
 
-        alt 時長 >= 20 分鐘
+        alt 時長超過 20 分鐘
             Bot->>Vault: 寫入 Transcripts/YYYY-MM/ 獨立逐字稿檔案
         end
         Bot->>Vault: 原子追加至 Knowledge_Logs/YYYY-MM_Knowledge_Log.md
         Vault->>Vault: OneDrive 即時同步至雲端
     end
 
-    Bot->>WS: 發送完成卡片 ("✅ 影片《...》精讀成功！已存入 Obsidian")
+    Bot->>WS: 發送完成卡片 ("✅ 影片精讀成功！已存入 Obsidian")
     WS->>User: 收到飛書成功通知卡片
 ```
 
