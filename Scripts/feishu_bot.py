@@ -110,31 +110,61 @@ def resolve_short_url(url: str) -> str:
     return url
 
 def extract_video_items(text: str) -> list:
-    """提取文字中的影片項目，包含 (url, title_hint)，嚴防中文連寫"""
-    items = []
-    
-    # 1. 匹配中文分享格式 【標題】 URL 或 【【標題】】 URL
-    bili_matches = re.findall(r'【+([^】]+)】+\s*((?:https?://|www\.)[a-zA-Z0-9\.\-_/~\?#=%&:;+@!*]+)', text)
-    for title, url in bili_matches:
-        clean_url = resolve_short_url(url.strip().rstrip(').,;!?\'"'))
-        clean_title = title.strip().strip('【】')
-        items.append((clean_url, clean_title))
+    """
+    提取文字中的影片項目，包含 (url, title_hint, user_comment)。
+    支援將兩個 link 之間的文字輸入提取為前一個 link 的評語。
+    """
+    url_pattern = re.compile(r'(?:https?://|www\.)[a-zA-Z0-9\.\-_/~\?#=%&:;+@!*]+')
+    url_matches = list(url_pattern.finditer(text))
+    if not url_matches:
+        return []
 
-    # 2. 匹配 Markdown 連結 [標題](URL)
-    md_matches = re.findall(r'\[(.*?)\]\(((?:https?://|www\.)[a-zA-Z0-9\.\-_/~\?#=%&:;+@!*]+)\)', text)
-    for title, url in md_matches:
-        clean_url = resolve_short_url(url.strip().rstrip(').,;!?\'"'))
-        if not any(clean_url == it[0] for it in items):
-            items.append((clean_url, title.strip()))
+    extracted_items = []
+    for i, u_match in enumerate(url_matches):
+        raw_url = u_match.group(0).rstrip(').,;!?\'"')
+        clean_url = resolve_short_url(raw_url)
         
-    # 3. 匹配常規 ASCII URL（嚴格排除中文字符，防止連寫時將中文判定為網址）
-    raw_urls = re.findall(r'(?:https?://|www\.)[a-zA-Z0-9\.\-_/~\?#=%&:;+@!*]+', text)
-    for u in raw_urls:
-        clean_u = resolve_short_url(u.strip().rstrip(').,;!?\'"'))
-        if not any(clean_u == it[0] for it in items):
-            items.append((clean_u, None))
+        prefix = text[:u_match.start()]
+        title_hint = None
+        entity_start = u_match.start()
+        entity_end = u_match.end()
+        
+        # 1. 檢查 Markdown 格式: [title](url)
+        m_md = re.search(r'\[([^\]\r\n]+)\]\(\s*$', prefix)
+        # 2. 檢查 B站格式: 【title】 url
+        m_bili = re.search(r'【+([^\r\n]+)】+\s*$', prefix)
+        
+        if m_md:
+            title_hint = m_md.group(1).strip()
+            entity_start = m_md.start()
+            if text[u_match.end():].startswith(')'):
+                entity_end = u_match.end() + 1
+        elif m_bili:
+            title_hint = re.sub(r'^[【\[]+|[】\]]+$', '', m_bili.group(1).strip()).strip()
+            entity_start = m_bili.start()
+
+        extracted_items.append({
+            "url": clean_url,
+            "title_hint": title_hint,
+            "entity_start": entity_start,
+            "entity_end": entity_end
+        })
+
+    results = []
+    for i, item in enumerate(extracted_items):
+        cur_end = item["entity_end"]
+        if i + 1 < len(extracted_items):
+            next_start = extracted_items[i + 1]["entity_start"]
+            raw_comment = text[cur_end:next_start]
+        else:
+            raw_comment = text[cur_end:]
             
-    return items
+        clean_comment = raw_comment.strip()
+        clean_comment = re.sub(r'^\s*[\)\]\}\-–—\s]+\s*', '', clean_comment).strip()
+        
+        results.append((item["url"], item["title_hint"], clean_comment))
+        
+    return results
 
 def parse_duration_string(dur_str: str) -> int:
     """將 1:15:08 或 52:14 或 3:45 等字串轉換為秒數"""
@@ -624,8 +654,8 @@ YouTube原片連結：{yt_url}（原片標題：{yt_title}）
 """
     return info, fallback_summary, "基礎待看條目", ""
 
-def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, transcript_text: str = "") -> str:
-    """原子寫入 Obsidian 月度日誌，並強制執行長視頻獨立逐字稿規範 (Rule 3)"""
+def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, transcript_text: str = "", user_comment: str = "") -> str:
+    """原子寫入 Obsidian 月度日誌，並強制執行長視頻獨立逐字稿規範 (Rule 3) 與評語記錄 (Rule 6)"""
     today = datetime.now()
     month_str = today.strftime("%Y-%m")
     today_str = today.strftime("%Y-%m-%d")
@@ -676,6 +706,17 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
             
         transcript_backlink = f"- 📄 [[Transcripts/{month_str}/{t_filename[:-3]}|查看完整整理逐字稿 (Transcript)]]\n"
 
+    # 執行規範 6：心得評語區塊處理
+    if user_comment and user_comment.strip():
+        formatted_comment_lines = "\n".join(f"> {line}" for line in user_comment.strip().splitlines())
+        comment_block = f"""### 個人批判性評語與心得 (飛書隨筆記錄)
+> [!quote] 筆記與心得記錄區
+{formatted_comment_lines}"""
+    else:
+        comment_block = """### 個人批判性評語與心得 (Obsidian 手動補充)
+> [!quote] 筆記與心得記錄區
+> （觀看後在此記錄個人心得、反思與批判性評語...）"""
+
     entry = f"""
 ## [{today_str}] {title}
 - [ ] [platform:: {platform}] | [channel:: {channel}] | [status:: 待觀看] | [importance:: 3]
@@ -685,9 +726,7 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
 {transcript_backlink}
 {ai_summary}
 
-### 個人批判性評語與心得 (Obsidian 手動補充)
-> [!quote] 筆記與心得記錄區
-> （觀看後在此記錄個人心得、反思與批判性評語...）
+{comment_block}
 
 ---
 """
@@ -696,9 +735,70 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
         
     return log_file.name
 
+def append_user_comment_to_latest_entry(new_comment: str) -> tuple[bool, str]:
+    """
+    在 Obsidian 月度知識日誌中定位最後一個影片條目，並將心得評語原子寫入或追加。
+    回傳: (是否成功, 影片標題)
+    """
+    today = datetime.now()
+    month_str = today.strftime("%Y-%m")
+    log_file = KNOWLEDGE_DIR / f"{month_str}_Knowledge_Log.md"
+    
+    # 若本月尚未有檔案，嘗試查找最近的日誌檔案
+    if not log_file.exists():
+        existing_logs = sorted(KNOWLEDGE_DIR.glob("*_Knowledge_Log.md"), reverse=True)
+        if existing_logs:
+            log_file = existing_logs[0]
+        else:
+            return False, ""
+            
+    try:
+        content = log_file.read_text(encoding="utf-8")
+        entry_pattern = re.compile(r'(?m)^##\s*\[\d{4}-\d{2}-\d{2}\]\s*(.+)$')
+        matches = list(entry_pattern.finditer(content))
+        if not matches:
+            return False, ""
+            
+        last_match = matches[-1]
+        title = last_match.group(1).strip()
+        last_entry_start = last_match.start()
+        last_entry_text = content[last_entry_start:]
+        
+        comment_header_pattern = re.compile(r'(###\s*個人批判性評語與心得.*?\n)(>.*?)(?=\n---\n|\Z)', re.DOTALL)
+        m_comment = comment_header_pattern.search(last_entry_text)
+        
+        formatted_comment_lines = "\n".join(f"> {line}" for line in new_comment.strip().splitlines())
+        
+        if m_comment:
+            header_str = m_comment.group(1)
+            new_header = re.sub(r'###\s*個人批判性評語與心得.*', '### 個人批判性評語與心得 (飛書隨筆記錄)\n', header_str)
+            existing_quotes = m_comment.group(2).strip()
+            
+            if "觀看後在此記錄" in existing_quotes:
+                new_quote_block = f"""> [!quote] 筆記與心得記錄區\n{formatted_comment_lines}"""
+            else:
+                new_quote_block = existing_quotes + "\n" + formatted_comment_lines
+                
+            updated_entry = last_entry_text[:m_comment.start()] + new_header + new_quote_block + "\n" + last_entry_text[m_comment.end():]
+        else:
+            new_block = f"""\n### 個人批判性評語與心得 (飛書隨筆記錄)\n> [!quote] 筆記與心得記錄區\n{formatted_comment_lines}\n"""
+            if "\n---\n" in last_entry_text:
+                idx = last_entry_text.rfind("\n---\n")
+                updated_entry = last_entry_text[:idx] + new_block + last_entry_text[idx:]
+            else:
+                updated_entry = last_entry_text + new_block
+                
+        updated_content = content[:last_entry_start] + updated_entry
+        log_file.write_text(updated_content, encoding="utf-8")
+        return True, title
+    except Exception as e:
+        logging.error(f"寫入評語至月度日誌出錯: {e}")
+        return False, ""
+
 bot_executor = ThreadPoolExecutor(max_workers=3)
 processed_msg_ids = set()
 pending_playlist_sessions: dict[str, dict] = {}
+active_processing_sessions: dict[str, dict] = {}
 
 def check_bilibili_playlist(url: str) -> dict:
     """檢測 Bilibili 是否為多 P 列表，若已自帶 ?p= 則視為已指定單集，不觸發選單"""
@@ -810,7 +910,20 @@ def process_video_items_worker(chat_id: str, items: list) -> None:
     """後台異步處理影片精讀流水線，不阻塞 WebSocket 長連接"""
     try:
         total_count = len(items)
-        for idx, (url, title_hint) in enumerate(items, 1):
+        for idx, item in enumerate(items, 1):
+            url = item[0]
+            title_hint = item[1] if len(item) > 1 else None
+            user_comment = item[2] if len(item) > 2 else ""
+            
+            # 記錄當前正在處理的影片會話狀態
+            active_processing_sessions[chat_id] = {
+                "url": url,
+                "title_hint": title_hint,
+                "user_comment": user_comment,
+                "status": "processing",
+                "started_at": time.time()
+            }
+            
             progress_prefix = f"({idx}/{total_count}) " if total_count > 1 else ""
             display_title = title_hint if title_hint else url
             logging.info(f"開始啟動智慧流水線: {progress_prefix}{url} (提示標題: {title_hint})")
@@ -818,18 +931,29 @@ def process_video_items_worker(chat_id: str, items: list) -> None:
             
             info, summary, mode_name, transcript_content = process_video_pipeline(url, title_hint=title_hint)
             
+            # 獲取可能在處理過程中由使用者即時發送的追加評語
+            final_comment = active_processing_sessions.get(chat_id, {}).get("user_comment", user_comment)
+            
             logging.info(f"--> 寫入 Obsidian (模式: {mode_name})...")
-            file_name = append_to_vault(url, info, summary, mode_name, transcript_content)
+            file_name = append_to_vault(url, info, summary, mode_name, transcript_content, user_comment=final_comment)
+            
+            active_processing_sessions[chat_id] = {
+                "url": url,
+                "title": info.get("title"),
+                "status": "completed",
+                "completed_at": time.time()
+            }
             
             orig_msg = f"\n🔗 原片溯源：{info['original_url']}" if info.get('original_url') else ""
-            reply_msg = f"✅ {progress_prefix}影片《{info.get('title')}》精讀成功！\n🎯 精讀模式：【{mode_name}】{orig_msg}\n📂 已存入 Obsidian：`{file_name}`\nOneDrive 正在實時同步中。"
+            comment_msg = f"\n✍️ 心得評語：已記錄至個人心得區" if final_comment else ""
+            reply_msg = f"✅ {progress_prefix}影片《{info.get('title')}》精讀成功！\n🎯 精讀模式：【{mode_name}】{orig_msg}{comment_msg}\n📂 已存入 Obsidian：`{file_name}`\nOneDrive 正在實時同步中。"
             reply_feishu_message(chat_id, reply_msg)
             logging.info(f"--> [完成] {progress_prefix}回傳飛書成功！")
     except Exception as e:
         logging.error(f"後台處理影片流水線出錯: {e}")
 
 def handle_incoming_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
-    """處理飛書接收到的訊息（非阻塞快速 ACK + 多 P 互動選單）"""
+    """處理飛書接收到的訊息（非阻塞快速 ACK + 多 P 互動選單 + 隨筆評語智能關聯）"""
     try:
         event = data.event
         msg = event.message
@@ -878,7 +1002,8 @@ def handle_incoming_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
                         part_title = pages_dict.get(p, f"第{p}講")
                         items.append((
                             f"https://www.bilibili.com/video/{bvid}?p={p}",
-                            f"{title} (P{p:02d} {part_title})"
+                            f"{title} (P{p:02d} {part_title})",
+                            ""
                         ))
                         
                     parts_desc = f"{parts[0]}~{parts[-1]}" if len(parts) > 2 and parts == list(range(parts[0], parts[-1]+1)) else ",".join(map(str, parts))
@@ -893,9 +1018,26 @@ def handle_incoming_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
             # 已過期，清理快取
             del pending_playlist_sessions[chat_id]
 
-        # 2. 正常提取網址
+        # 2. 正常提取網址（包含兩個 link 之間的隨筆評語）
         items = extract_video_items(raw_text)
         if not items:
+            # 檢查是否為針對影片的心得評語
+            # 情況 A: 當前 chat_id 正在後台分析影片，將評語附加到處理隊列中
+            if chat_id in active_processing_sessions and active_processing_sessions[chat_id].get("status") == "processing":
+                existing_c = active_processing_sessions[chat_id].get("user_comment", "")
+                new_c = f"{existing_c}\n{raw_text}".strip() if existing_c else raw_text
+                active_processing_sessions[chat_id]["user_comment"] = new_c
+                reply_feishu_message(chat_id, f"✍️ 已收到您的心得評語！將於當前影片精讀完成後一併寫入 Obsidian 筆記中：\n> {raw_text}")
+                logging.info(f"用戶針對處理中影片追加評語: {raw_text}")
+                return
+                
+            # 情況 B: 嘗試追加至 Obsidian 最近完成的影片條目中
+            success, title = append_user_comment_to_latest_entry(raw_text)
+            if success:
+                reply_feishu_message(chat_id, f"✍️ 已為您將心得評語追加至最新影片《{title}》的 Obsidian 筆記中：\n> {raw_text}")
+                logging.info(f"已將用戶心得評語寫入月度日誌最新條目: {title}")
+                return
+                
             reply_feishu_message(chat_id, "👋 您好！請發送 YouTube 或 Bilibili 影片連結給我，我將啟動智慧多模態流水線為您深度精讀！")
             return
             
