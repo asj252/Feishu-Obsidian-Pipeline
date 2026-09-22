@@ -41,10 +41,23 @@ import yt_dlp
 # 基礎路徑設定
 VAULT_ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE_DIR = VAULT_ROOT / "Knowledge_Logs"
+WEEKLY_DIR = KNOWLEDGE_DIR / "Weekly"
+MONTHLY_DIR = KNOWLEDGE_DIR / "Monthly"
 TRANSCRIPTS_DIR = VAULT_ROOT / "Transcripts"
 INBOX_FILE = VAULT_ROOT / "Inbox_Pending.md"
 ENV_FILE = VAULT_ROOT / ".env"
 COOKIES_FILE = VAULT_ROOT / "cookies.txt"
+
+def get_current_week_info(dt: datetime = None) -> tuple[str, str, str]:
+    """回傳 (week_str, start_date_str, end_date_str)，如 ('2026-W39', '2026-09-21', '2026-09-27')"""
+    if dt is None:
+        dt = datetime.now()
+    iso_year, iso_week, iso_weekday = dt.isocalendar()
+    week_str = f"{iso_year}-W{iso_week:02d}"
+    from datetime import timedelta
+    start_of_week = dt - timedelta(days=iso_weekday - 1)
+    end_of_week = start_of_week + timedelta(days=6)
+    return week_str, start_of_week.strftime("%Y-%m-%d"), end_of_week.strftime("%Y-%m-%d")
 
 # 載入 .env
 def load_env():
@@ -655,16 +668,28 @@ YouTube原片連結：{yt_url}（原片標題：{yt_title}）
     return info, fallback_summary, "基礎待看條目", ""
 
 def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, transcript_text: str = "", user_comment: str = "") -> str:
-    """原子寫入 Obsidian 月度日誌，並強制執行長視頻獨立逐字稿規範 (Rule 3) 與評語記錄 (Rule 6)"""
+    """原子寫入 Obsidian 週度日誌流 (Rule 7)，並強制執行長視頻獨立逐字稿規範 (Rule 3) 與評語記錄 (Rule 6)"""
     today = datetime.now()
-    month_str = today.strftime("%Y-%m")
+    week_str, start_date_str, end_date_str = get_current_week_info(today)
     today_str = today.strftime("%Y-%m-%d")
+    month_str = today.strftime("%Y-%m")
     
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = KNOWLEDGE_DIR / f"{month_str}_Knowledge_Log.md"
+    WEEKLY_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = WEEKLY_DIR / f"{week_str}_Knowledge_Log.md"
     
     if not log_file.exists():
-        header = f"# {today.strftime('%Y年%m月')} 知識與時政影片閱讀長流\n\n---\n"
+        header = f"""# {week_str[:4]}年第{week_str[-2:]}週 ({start_date_str} ~ {end_date_str}) 知識與時政影片閱讀週度流
+
+- [status:: 收集進行中] | [organized:: false]
+- [week:: {week_str}]
+
+> **使用說明**：
+> 1. 本文檔為 {week_str} 之週度影片精讀長流（每週單一檔案線性聚合，防範小檔案同步風暴）。
+> 2. 由飛書機器人自動分析並即時追加於文末，支援隨筆評語自動記錄。
+> 3. 在飛書發送「**zl，整理**」指令時，本週之前的未整理週度日誌將全自動歸檔為「月度分類檔案」，並生成好中壞評價與統計報表。
+
+---
+"""
         log_file.write_text(header, encoding="utf-8")
         
     title = info.get("title", "未命名影片")
@@ -690,7 +715,7 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
         t_content = f"""# 📜 整理逐字稿與深度筆記：{title}
 
 > **關聯導航**：
-> - 📑 返回月度日誌精讀條目：[[Knowledge_Logs/{month_str}_Knowledge_Log#{today_str} {title}|{today.strftime('%Y年%m月')}知識日誌]]
+> - 📑 返回週度日誌精讀條目：[[Knowledge_Logs/Weekly/{week_str}_Knowledge_Log#{today_str} {title}|{week_str}週度日誌]]
 > - 🔗 原始影片連結：[{platform}]({url})
 > - ⏱️ 影片時長：{duration_str} | 頻道/作者：{channel}
 > - 模式標籤：{mode_name}
@@ -737,20 +762,29 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
 
 def append_user_comment_to_latest_entry(new_comment: str) -> tuple[bool, str]:
     """
-    在 Obsidian 月度知識日誌中定位最後一個影片條目，並將心得評語原子寫入或追加。
+    在 Obsidian 週度知識日誌中定位最後一個影片條目，並將心得評語原子寫入或追加。
     回傳: (是否成功, 影片標題)
     """
     today = datetime.now()
-    month_str = today.strftime("%Y-%m")
-    log_file = KNOWLEDGE_DIR / f"{month_str}_Knowledge_Log.md"
+    week_str, _, _ = get_current_week_info(today)
     
-    # 若本月尚未有檔案，嘗試查找最近的日誌檔案
-    if not log_file.exists():
-        existing_logs = sorted(KNOWLEDGE_DIR.glob("*_Knowledge_Log.md"), reverse=True)
-        if existing_logs:
-            log_file = existing_logs[0]
-        else:
-            return False, ""
+    # 依序尋找目標日誌檔案：當週週度日誌 -> 最近週度日誌 -> 根目錄日誌
+    target_files = []
+    current_weekly_log = WEEKLY_DIR / f"{week_str}_Knowledge_Log.md"
+    if current_weekly_log.exists():
+        target_files.append(current_weekly_log)
+        
+    target_files.extend(sorted(WEEKLY_DIR.glob("*_Knowledge_Log.md"), reverse=True))
+    target_files.extend(sorted(KNOWLEDGE_DIR.glob("*_Knowledge_Log.md"), reverse=True))
+    
+    log_file = None
+    for f in target_files:
+        if f.exists():
+            log_file = f
+            break
+            
+    if not log_file:
+        return False, ""
             
     try:
         content = log_file.read_text(encoding="utf-8")
@@ -774,7 +808,7 @@ def append_user_comment_to_latest_entry(new_comment: str) -> tuple[bool, str]:
             new_header = re.sub(r'###\s*個人批判性評語與心得.*', '### 個人批判性評語與心得 (飛書隨筆記錄)\n', header_str)
             existing_quotes = m_comment.group(2).strip()
             
-            if "觀看後在此記錄" in existing_quotes:
+            if "觀看後在此記錄" in existing_quotes or "观看后在此记录" in existing_quotes:
                 new_quote_block = f"""> [!quote] 筆記與心得記錄區\n{formatted_comment_lines}"""
             else:
                 new_quote_block = existing_quotes + "\n" + formatted_comment_lines
@@ -792,8 +826,265 @@ def append_user_comment_to_latest_entry(new_comment: str) -> tuple[bool, str]:
         log_file.write_text(updated_content, encoding="utf-8")
         return True, title
     except Exception as e:
-        logging.error(f"寫入評語至月度日誌出錯: {e}")
+        logging.error(f"寫入評語至日誌出錯: {e}")
         return False, ""
+
+def classify_and_evaluate_entry(title: str, tags: list, summary: str, user_comment: str, existing_categories: list[str]) -> dict:
+    """
+    利用 Gemini API 進行語意分類與評語好中壞評價判定。
+    回傳: {"category": str, "is_new": bool, "evaluation": "好"|"中"|"壞"}
+    """
+    if not GEMINI_KEY:
+        cat = "AI與大模型" if any("ai" in t.lower() for t in tags) or "ai" in title.lower() else "綜合知識"
+        is_new = cat not in existing_categories
+        eval_res = "好" if any(k in user_comment for k in ["好", "讚", "棒", "推薦", "精彩"]) else ("壞" if any(k in user_comment for k in ["差", "爛", "不嚴謹", "浪費"]) else "中")
+        return {"category": cat, "is_new": is_new, "evaluation": eval_res}
+        
+    prompt = f"""請針對以下影片知識庫條目進行【主題分類】與【評語評價判定】：
+
+影片標題：{title}
+影片標籤：{", ".join(tags) if tags else "無"}
+核心摘要片段：{summary[:500]}
+使用者個人心得/評語：{user_comment if user_comment else "（無使用者評語）"}
+
+現有類別庫：{json.dumps(existing_categories, ensure_ascii=False) if existing_categories else "[]"}
+
+請嚴格遵循以下要求：
+1. 【主題分類】(category)：
+   - 若現有類別庫中有語意合適的類別，請優先選用現有類別（必須精確匹配現有名稱）；
+   - 若現有類別庫為空，或現有類別皆無法合適涵蓋該影片主題，請提出一個精準簡練的繁體中文新類別名稱（2~6 個字，例如：「AI與大模型」、「軟體架構與程式開發」、「全球經濟與金融」、「地緣政治與歷史」、「人文社科」、「生物醫藥」等）。
+2. 【評語評價判定】(evaluation)：
+   - 根據使用者個人心得/評語的情感傾向判定：
+     - 若評語表達讚賞、收穫大、強烈推薦、高價值、深刻、論述嚴謹 -> "好"
+     - 若評語指出錯誤、批判論點不嚴謹、內容水、浪費時間、強烈質疑 -> "壞"
+     - 若評語為客觀筆記、中性描述、正反皆有、或使用者無評語（如只有預設佔位符） -> 預設為 "中"
+
+請以純 JSON 格式輸出（不得包含任何 markdown 代碼塊標記）：
+{{"category": "類別名稱", "is_new": true或false, "evaluation": "好或中或壞"}}
+"""
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_KEY}"
+    try:
+        resp = requests.post(api_url, json={"contents": [{"parts": [{"text": prompt}]}]}, proxies=PROXIES, timeout=25)
+        if resp.status_code == 200:
+            text = resp.json()['candidates'][0]['content']['parts'][0]['text']
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            if m:
+                res = json.loads(m.group(0))
+                cat = res.get("category", "").strip().strip('"\'')
+                eval_val = res.get("evaluation", "中").strip()
+                if eval_val not in ["好", "中", "壞"]:
+                    eval_val = "中"
+                is_new = res.get("is_new", cat not in existing_categories)
+                if not cat:
+                    cat = "綜合知識"
+                return {"category": cat, "is_new": is_new, "evaluation": eval_val}
+    except Exception as e:
+        logging.warning(f"Gemini 歸檔分類請求異常: {e}")
+
+    cat = "AI與大模型" if any("ai" in t.lower() for t in tags) or "ai" in title.lower() else "綜合知識"
+    is_new = cat not in existing_categories
+    eval_res = "好" if any(k in user_comment for k in ["好", "讚", "棒", "推薦", "精彩"]) else ("壞" if any(k in user_comment for k in ["差", "爛", "不嚴謹", "浪費"]) else "中")
+    return {"category": cat, "is_new": is_new, "evaluation": eval_res}
+
+def organize_weekly_logs_worker(chat_id: str) -> None:
+    """
+    執行 'zl，整理' 流程：
+    1. 掃描未整理過的週度日誌（排除本週，排除已整理過）
+    2. 按月份將條目分類歸檔至月度分檔案日誌中
+    3. 動態識別或新建類別，並統計各類別加入數量
+    4. 依評語標記 [evaluation:: 好/中/壞]（無評語預設中等）
+    5. 回報詳細統計至飛書
+    """
+    try:
+        today = datetime.now()
+        current_week, _, _ = get_current_week_info(today)
+        
+        WEEKLY_DIR.mkdir(parents=True, exist_ok=True)
+        MONTHLY_DIR.mkdir(parents=True, exist_ok=True)
+        
+        weekly_files = sorted(WEEKLY_DIR.glob("*_Knowledge_Log.md"))
+        eligible_files = []
+        for f in weekly_files:
+            match = re.match(r'^(\d{4}-W\d{2})_Knowledge_Log\.md$', f.name)
+            if match:
+                w_str = match.group(1)
+                # 排除本週進行中日誌
+                if w_str >= current_week:
+                    continue
+                content = f.read_text(encoding="utf-8")
+                # 排除已整理過的日誌
+                if "[organized:: true]" in content or "[status:: 已整理歸檔]" in content:
+                    continue
+                eligible_files.append((w_str, f, content))
+                
+        if not eligible_files:
+            reply_feishu_message(
+                chat_id,
+                f"ℹ️ 掃描完成：目前沒有過去待整理的週度日誌。\n"
+                f"👉 本週進行中的日誌（{current_week}）依規則保留收集，不予提前歸檔；其餘歷史週日誌皆已完成整理。"
+            )
+            return
+
+        total_processed_videos = 0
+        processed_weeks = []
+        category_stats = {}      # category -> count
+        new_category_stats = {}  # category -> count
+        eval_stats = {"好": 0, "中": 0, "壞": 0}
+        
+        for w_str, file_path, content in eligible_files:
+            processed_weeks.append(w_str)
+            
+            # 切分各個條目
+            entry_pattern = re.compile(r'(?m)^##\s*\[(\d{4}-\d{2}-\d{2})\]\s*(.+)$')
+            matches = list(entry_pattern.finditer(content))
+            if not matches:
+                continue
+                
+            for i, m in enumerate(matches):
+                date_str = m.group(1)
+                title = m.group(2).strip()
+                start_idx = m.start()
+                end_idx = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+                raw_entry = content[start_idx:end_idx].strip()
+                
+                # 移除尾部 ---
+                if raw_entry.endswith("---"):
+                    raw_entry = raw_entry[:-3].strip()
+                    
+                target_month = date_str[:7]
+                month_dir = MONTHLY_DIR / target_month
+                month_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 讀取該月份已存在的類別檔案名稱（不含 .md）
+                existing_cats = [cf.stem for cf in month_dir.glob("*.md")]
+                
+                # 提取摘要與標籤
+                tags_match = re.search(r'-\s*\[tags::\s*([^\]]+)\]', raw_entry)
+                tags = [t.strip() for t in tags_match.group(1).split()] if tags_match else []
+                
+                # 提取評語內容
+                user_comment = ""
+                m_comment = re.search(r'###\s*個人批判性評語與心得.*?\n(>.*?)(?=\n---\n|\Z)', raw_entry, re.DOTALL)
+                if m_comment:
+                    lines = [line.lstrip('> ').strip() for line in m_comment.group(1).splitlines() if line.strip() and not line.startswith('> [!')]
+                    cmt = "\n".join(lines).strip()
+                    if cmt and "觀看後在此記錄" not in cmt and "观看后在此记录" not in cmt:
+                        user_comment = cmt
+                        
+                # 取得核心論點摘要
+                m_summary = re.search(r'###\s*核心論點與摘要.*?\n(.*?)(?=###|\Z)', raw_entry, re.DOTALL)
+                summary_text = m_summary.group(1).strip() if m_summary else ""
+                
+                # 調用分類與好中壞評價
+                classify_res = classify_and_evaluate_entry(title, tags, summary_text, user_comment, existing_cats)
+                cat_name = classify_res["category"]
+                is_new = classify_res["is_new"]
+                eval_val = classify_res["evaluation"]
+                
+                # 統計
+                total_processed_videos += 1
+                eval_stats[eval_val] = eval_stats.get(eval_val, 0) + 1
+                if is_new and cat_name not in existing_cats:
+                    new_category_stats[cat_name] = new_category_stats.get(cat_name, 0) + 1
+                else:
+                    category_stats[cat_name] = category_stats.get(cat_name, 0) + 1
+                    
+                # 在 entry 中注入 evaluation 與 category
+                # 1. 在狀態行最後加上 | [evaluation:: {eval_val}]
+                updated_entry = re.sub(
+                    r'(-\s*\[\s*\]\s*\[platform::[^\]]+\]\s*\|\s*\[channel::[^\]]+\]\s*\|\s*\[status::[^\]]+\]\s*\|\s*\[importance::\s*\d+\])',
+                    r'\1 | [evaluation:: ' + eval_val + ']',
+                    raw_entry
+                )
+                if '[evaluation::' not in updated_entry:
+                    updated_entry = re.sub(
+                        r'^(##\s*\[\d{4}-\d{2}-\d{2}\][^\n]+\n-\s*\[.*?)$',
+                        r'\1 | [evaluation:: ' + eval_val + ']',
+                        updated_entry,
+                        flags=re.M
+                    )
+                    
+                # 2. 在 tags 行注入 | [category:: {cat_name}]
+                if '[category::' not in updated_entry:
+                    updated_entry = re.sub(
+                        r'(-\s*\[tags::[^\]]+\])',
+                        r'\1 | [category:: ' + cat_name + ']',
+                        updated_entry
+                    )
+
+                # 寫入目標月度分類檔案
+                cat_file = month_dir / f"{cat_name}.md"
+                if not cat_file.exists():
+                    year_val, month_val = target_month.split("-")
+                    cat_header = f"""# {year_val}年{month_val}月 分類精讀：{cat_name}
+
+- [month:: {target_month}]
+- [category:: {cat_name}]
+- [type:: 月度分類知識庫]
+
+> **導航與說明**：
+> - 本文檔為 {target_month} 月份【{cat_name}】主題之沉澱歸檔。
+> - 來源：由各週度日誌透過「**zl，整理**」指令動態聚類生成，並依據隨筆評語自動標記 `[evaluation:: 好/中/壞]`。
+
+---
+
+"""
+                    cat_file.write_text(cat_header, encoding="utf-8")
+                    
+                with open(cat_file, "a", encoding="utf-8") as f_cat:
+                    f_cat.write(f"\n{updated_entry}\n\n---\n")
+
+            # 標記週度檔案為已整理
+            new_header = re.sub(
+                r'-\s*\[status::\s*收集進行中\]\s*\|\s*\[organized::\s*false\]',
+                f'- [status:: 已整理歸檔] | [organized:: true] | [organized_at:: {datetime.now().strftime("%Y-%m-%d %H:%M")}]',
+                content
+            )
+            archive_notice = f"\n> [!success] 整理歸檔完成\n> 本週日誌已於 {datetime.now().strftime('%Y-%m-%d %H:%M')} 完成月度分類歸檔。\n> 歸檔目標目錄：[[Knowledge_Logs/Monthly/]]\n"
+            if "\n---\n" in new_header:
+                idx = new_header.find("\n---\n")
+                updated_weekly = new_header[:idx] + archive_notice + new_header[idx:]
+            else:
+                updated_weekly = new_header + archive_notice
+                
+            file_path.write_text(updated_weekly, encoding="utf-8")
+
+        # 組裝飛書回報統計訊息
+        weeks_display = ", ".join(processed_weeks)
+        msg_lines = [
+            "📊 【週度日誌歸檔與月度分類整理完成】",
+            f"📅 已處理歷史週次：{weeks_display}（共 {total_processed_videos} 部影片）",
+            "━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+        
+        if category_stats:
+            msg_lines.append("📂 現有類別歸檔：")
+            for c_name, c_cnt in sorted(category_stats.items(), key=lambda x: -x[1]):
+                msg_lines.append(f"  • {c_name}：+{c_cnt} 部")
+                
+        if new_category_stats:
+            msg_lines.append("✨ 本次新成立類別：")
+            for c_name, c_cnt in sorted(new_category_stats.items(), key=lambda x: -x[1]):
+                msg_lines.append(f"  • {c_name}：+{c_cnt} 部")
+                
+        msg_lines.extend([
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "⭐ 評語評價分佈：",
+            f"  • 🌟 好評：{eval_stats.get('好', 0)} 部",
+            f"  • ⚖️ 中等：{eval_stats.get('中', 0)} 部（含無評語預設）",
+            f"  • 👎 差評：{eval_stats.get('壞', 0)} 部",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "📁 歸檔目錄：`Knowledge_Logs/Monthly/`",
+            "OneDrive 正在實時同步至雲端與 Obsidian 保險庫。"
+        ])
+        
+        final_msg = "\n".join(msg_lines)
+        reply_feishu_message(chat_id, final_msg)
+        logging.info(f"成功完成週度日誌歸檔並回傳飛書統計 (共 {total_processed_videos} 部影片)")
+        
+    except Exception as e:
+        logging.error(f"執行週度整理歸檔管線失敗: {e}")
+        reply_feishu_message(chat_id, f"⚠️ 整理歸檔過程出錯: {e}")
 
 bot_executor = ThreadPoolExecutor(max_workers=3)
 processed_msg_ids = set()
@@ -976,6 +1267,13 @@ def handle_incoming_message(data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         raw_text = content_json.get("text", "").strip()
         
         logging.info(f"收到飛書訊息: {raw_text}")
+        
+        # 0. 整理指令觸發 (zl / 整理 / zl，整理)
+        clean_cmd = re.sub(r'[\s,，、/!！]+', '', raw_text.strip().lower())
+        if clean_cmd in ["zl", "整理", "zl整理", "整理zl", "organize", "歸檔", "归档"]:
+            reply_feishu_message(chat_id, "⏳ 收到整理指令！正在為您掃描過往未整理的週度日誌，並啟動月度智慧分類與評價歸檔...")
+            bot_executor.submit(organize_weekly_logs_worker, chat_id)
+            return
         
         # 1. 檢查是否有該用戶正在等待的多 P 選擇對話 (10 分鐘內有效)
         session = pending_playlist_sessions.get(chat_id)

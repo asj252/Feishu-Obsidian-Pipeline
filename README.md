@@ -204,9 +204,9 @@ sequenceDiagram
 
 ## 🌟 核心特色 (Key Features)
 
-### 1. 雙軌存儲機制與防同步風暴
-- **月度長流聚合**（`Knowledge_Logs/YYYY-MM_Knowledge_Log.md`）：所有知識型影片按月度線性追加，嚴禁為單個影片創建孤立零散小檔案，從根本上杜絕 OneDrive 的大量小檔案同步衝突與索引風暴。
-- **長視頻獨立歸檔**（`Transcripts/YYYY-MM/`）：影片時長 $\ge 20$ 分鐘時，自動將萬字逐字稿與深度段落單獨存為檔案，並於月度日誌中建立雙向鏈接（`📄 [[Transcripts/...|查看逐字稿]]`）。
+### 1. 週度日誌聚合與長視頻獨立逐字稿 (Double-Track Storage)
+- **週度長流聚合**（`Knowledge_Logs/Weekly/YYYY-Www_Knowledge_Log.md`）：新發送之影片按週度線性追加，單週單檔案，杜絕 OneDrive 大量小檔案同步衝突與索引風暴。
+- **長視頻獨立歸檔**（`Transcripts/YYYY-MM/`）：影片時長 $\ge 20$ 分鐘時，自動將萬字逐字稿與深度段落單獨存為檔案，並於日誌中建立雙向鏈接（`📄 [[Transcripts/...|查看逐字稿]]`）。
 
 ### 2. Rule 5 跨平台 YouTube 同源原片反向關聯
 - B 站常有優質海外講座（如史丹佛 CS 課程、MIT 公開課、TED、Lex Fridman 訪談），但多數缺乏官方字幕；
@@ -226,14 +226,21 @@ sequenceDiagram
 - **多連結間文字自動識別**：若使用者在單條訊息中發送多個連結，**夾在兩個連結之間的文字輸入**將自動提取並寫入前一個影片的「個人批判性評語與心得」區塊；
 - **多輪對話動態追加**：支援在影片發送後單獨發送文字訊息，機器人自動關聯當前正在分析或最近完成的影片，將隨筆心得即時追加至 Obsidian 筆記中。
 
+### 6. 「zl，整理」月度智慧分類與好中壞評價 (Rule 7 Monthly Categorization Pipeline)
+- **飛書指令觸發**：在飛書私聊發送「`zl`」、「`整理`」或「`zl，整理`」，系統自動啟動歷史日誌歸檔；
+- **嚴格排除保護**：自動排除本週進行中的日誌（不提前封閉），自動排除歷史已歸檔的日誌（冪等防重複）；
+- **AI 動態聚類**：自動對齊現存月度分類，或由 Gemini 動態建立合適的新類別（如「AI與大模型」、「生物醫藥」、「政治哲學」等）；
+- **好中壞情感評價**：根據隨筆評語自動標註 `[evaluation:: 好/中/壞]`（無評語預設中等），並向飛書回傳詳細統計報表。
+
 ---
 
 ## 📂 目錄結構規範 (Directory Layout)
 
 ```
 ASJ_KVault/
-├── Knowledge_Logs/                 # 時政與科技知識月度長日誌 (由機器人自動按月建立)
-│   └── 2026-09_Knowledge_Log.md
+├── Knowledge_Logs/                 # 知識日誌儲存核心
+│   ├── Weekly/                     # 週度收集日誌流 (YYYY-Www_Knowledge_Log.md)
+│   └── Monthly/                    # 月度分類歸檔庫 (YYYY-MM/類別名.md)
 ├── Transcripts/                    # 長視頻獨立逐字稿庫 (Rule 3 獨立歸檔)
 │   └── 2026-09/
 │       ├── 2026-09-10_史丹佛講座..._逐字稿.md
@@ -245,6 +252,8 @@ ASJ_KVault/
 │   ├── Library_Index.md
 │   └── System_Rules.md             # 知識庫規範與 AI 生成標準文檔
 ├── _Templates/                     # Obsidian 範本 (Templates)
+│   ├── Knowledge_Weekly_Template.md
+│   ├── Knowledge_Monthly_Category_Template.md
 │   ├── Knowledge_Monthly_Template.md
 │   ├── Knowledge_Video_Entry_Template.md
 │   └── Classical_Work_Template.md
@@ -256,7 +265,6 @@ ASJ_KVault/
 │   └── start_feishu_bot.ps1        # PowerShell 啟動腳本
 ├── .env.example                    # 環境變數範本 (開源範本，嚴禁提交真實金鑰)
 ├── .gitignore                      # 嚴格排除 .env, cookies.txt, 臨時音訊與個人筆記
-├── LICENSE                         # MIT 開源授權協議
 └── README.md                       # 專案架構與使用手冊
 ```
 
