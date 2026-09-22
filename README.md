@@ -82,8 +82,8 @@ flowchart TD
     Rule5 -->|通過嚴格校驗| Rule5Check
     Rule5Check --> Rule5Gemini
     Rule5 -->|本土原創或校驗未通過| Tier2
-    Tier2 -->|30 分鐘以內| Tier2Gemini
-    Tier2 -->|超過 30 分鐘| Tier3Gemini
+    Tier2 -->|120 分鐘以內| Tier2Gemini
+    Tier2 -->|超過 120 分鐘| Tier3Gemini
 
     Tier1Gemini --> MonthlyLog
     Rule5Gemini --> MonthlyLog
@@ -231,6 +231,10 @@ sequenceDiagram
 - **嚴格排除保護**：自動排除本週進行中的日誌（不提前封閉），自動排除歷史已歸檔的日誌（冪等防重複）；
 - **AI 動態聚類**：自動對齊現存月度分類，或由 Gemini 動態建立合適的新類別（如「AI與大模型」、「生物醫藥」、「政治哲學」等）；
 - **好中壞情感評價**：根據隨筆評語自動標註 `[evaluation:: 好/中/壞]`（無評語預設中等），並向飛書回傳詳細統計報表。
+
+### 7. 網址防追蹤清洗與正規化 (Rule 8 URL Tracker Stripping)
+- **拒絕無效參數污染**：自動辨識並徹底剝離 Bilibili（`trackid`、`spm_id_from`、`vd_source` 等）與 YouTube（`si`、`feature`、`pp` 等）注入的演算法追蹤參數；
+- **標準永久連結保障**：統一標準化為純淨格式（如 `https://www.bilibili.com/video/BVxxxx/`），多 P 影片自動保留必要之 `?p=N`，確保 Obsidian 筆記中元數據與連結唯一性。
 
 ---
 

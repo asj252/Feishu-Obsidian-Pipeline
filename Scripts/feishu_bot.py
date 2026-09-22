@@ -109,6 +109,58 @@ def reply_feishu_message(chat_id: str, text: str):
     except Exception as e:
         logging.error(f"發送飛書回覆異常: {e}")
 
+def clean_tracking_url(url: str) -> str:
+    """
+    【Rule 8】徹底剔除網址中各大平台注入的無效追蹤器 (Trackers) 與行銷標籤，
+    將 Bilibili、YouTube 及其他網址正規化為純淨、唯一的標準永久連結。
+    """
+    if not url:
+        return ""
+    url = url.strip()
+    
+    # 1. Bilibili 影片網址正規化 (保留有效分 P 參數 p，剔除其餘追蹤器)
+    m_bili = re.search(r'(?:bilibili\.com/video/)(BV[a-zA-Z0-9]+|av\d+)', url, re.IGNORECASE)
+    if m_bili:
+        vid_id = m_bili.group(1)
+        parsed = urllib.parse.urlparse(url)
+        q_params = urllib.parse.parse_qs(parsed.query)
+        p_val = q_params.get('p', [None])[0]
+        if p_val and p_val.isdigit() and int(p_val) > 1:
+            return f"https://www.bilibili.com/video/{vid_id}/?p={p_val}"
+        return f"https://www.bilibili.com/video/{vid_id}/"
+        
+    # 2. YouTube 影片網址正規化 (保留有效時間戳記 t，剔除其餘追蹤器)
+    m_yt = re.search(r'(?:youtube\.com/(?:watch\?.*v=|shorts/|embed/)|youtu\.be/)([a-zA-Z0-9_-]{11})', url)
+    if m_yt:
+        vid_id = m_yt.group(1)
+        parsed = urllib.parse.urlparse(url)
+        q_params = urllib.parse.parse_qs(parsed.query)
+        is_shorts = '/shorts/' in parsed.path
+        base = f"https://www.youtube.com/shorts/{vid_id}" if is_shorts else f"https://www.youtube.com/watch?v={vid_id}"
+        t_val = q_params.get('t', [None])[0]
+        if t_val:
+            base += f"&t={t_val}" if '?' in base else f"?t={t_val}"
+        return base
+        
+    # 3. 通用網址防追蹤過濾
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.query:
+            q_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            tracker_keys = {
+                'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+                'spm_id_from', 'trackid', 'vd_source', 'from_source', 'from', 'seid',
+                'share_source', 'share_medium', 'share_plat', 'share_session_id', 'share_tag',
+                'unique_k', 'mid', 'fbclid', 'gclid', 'msclkid', 'ref', 'ref_src'
+            }
+            filtered_params = {k: v for k, v in q_params.items() if k.lower() not in tracker_keys}
+            new_query = urllib.parse.urlencode(filtered_params, doseq=True)
+            return urllib.parse.urlunparse(parsed._replace(query=new_query))
+    except Exception:
+        pass
+        
+    return url
+
 def resolve_short_url(url: str) -> str:
     """若是 b23.tv 或短鏈接，自動解析獲取真實跳轉網址"""
     if "b23.tv" in url:
@@ -126,6 +178,7 @@ def extract_video_items(text: str) -> list:
     """
     提取文字中的影片項目，包含 (url, title_hint, user_comment)。
     支援將兩個 link 之間的文字輸入提取為前一個 link 的評語。
+    並自動執行 Rule 8 剔除各類追蹤參數。
     """
     url_pattern = re.compile(r'(?:https?://|www\.)[a-zA-Z0-9\.\-_/~\?#=%&:;+@!*]+')
     url_matches = list(url_pattern.finditer(text))
@@ -135,7 +188,7 @@ def extract_video_items(text: str) -> list:
     extracted_items = []
     for i, u_match in enumerate(url_matches):
         raw_url = u_match.group(0).rstrip(').,;!?\'"')
-        clean_url = resolve_short_url(raw_url)
+        clean_url = clean_tracking_url(resolve_short_url(raw_url))
         
         prefix = text[:u_match.start()]
         title_hint = None
@@ -246,6 +299,7 @@ def get_youtube_fallback_info(url: str, proxies: dict = None) -> dict:
 
 def get_video_info(url: str, title_hint: str = None) -> dict:
     """利用 yt_dlp 抓取影片元數據，若遇阻斷則自動啟動多級回退機制"""
+    url = clean_tracking_url(url)
     platform = "Bilibili" if "bilibili.com" in url or "b23.tv" in url else ("YouTube" if "youtube.com" in url or "youtu.be" in url else "Video")
     
     default_title = title_hint if title_hint else f"未命名影片 ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
@@ -432,15 +486,124 @@ def extract_subtitles_text(url: str) -> tuple[str, str]:
         logging.warning(f"字幕提取跳過: {e}")
     return "", ""
 
+def upload_file_to_gemini(file_path: Path, mime_type: str = "audio/mp4") -> dict:
+    """
+    透過 Google Gemini Files API 可續傳上傳協議 (Resumable Upload)
+    上傳大型音訊檔案 (可達 2GB)，突破直接 Inline Base64 請求的 20MB 限制。
+    回傳: {"name": "files/...", "uri": "https://..."} 或 None
+    """
+    if not file_path.exists():
+        return None
+    try:
+        file_bytes = file_path.read_bytes()
+        num_bytes = len(file_bytes)
+        
+        # 1. 發送初始化請求獲取 resumable upload url
+        init_headers = {
+            "x-goog-api-key": GEMINI_KEY,
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(num_bytes),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": "application/json"
+        }
+        init_url = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+        r_init = requests.post(
+            init_url,
+            headers=init_headers,
+            json={"file": {"display_name": file_path.name}},
+            proxies=PROXIES,
+            timeout=30
+        )
+        if r_init.status_code != 200:
+            logging.error(f"Gemini Files API 初始化失敗 ({r_init.status_code}): {r_init.text[:200]}")
+            return None
+            
+        upload_url = r_init.headers.get("x-goog-upload-url") or r_init.headers.get("X-Goog-Upload-URL")
+        if not upload_url:
+            logging.error("Gemini Files API 未回傳 x-goog-upload-url")
+            return None
+            
+        # 2. 上傳二進位資料並完成
+        upload_headers = {
+            "Content-Length": str(num_bytes),
+            "X-Goog-Upload-Offset": "0",
+            "X-Goog-Upload-Command": "upload, finalize"
+        }
+        r_upload = requests.post(
+            upload_url,
+            headers=upload_headers,
+            data=file_bytes,
+            proxies=PROXIES,
+            timeout=120
+        )
+        if r_upload.status_code == 200:
+            file_meta = r_upload.json().get("file", {})
+            logging.info(f"Gemini Files API 上傳成功: {file_meta.get('name')} ({num_bytes / 1024 / 1024:.2f} MB)")
+            return file_meta
+        else:
+            logging.error(f"Gemini Files API 資料傳輸失敗 ({r_upload.status_code}): {r_upload.text[:200]}")
+    except Exception as e:
+        logging.error(f"Gemini Files API 上傳異常: {e}")
+    return None
+
+def delete_file_from_gemini(file_name: str):
+    """清理 Google AI 伺服器上的臨時上傳檔案"""
+    if not file_name:
+        return
+    try:
+        del_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={GEMINI_KEY}"
+        requests.delete(del_url, proxies=PROXIES, timeout=15)
+        logging.info(f"已清理 Gemini 遠端臨時音訊檔: {file_name}")
+    except Exception as e:
+        logging.warning(f"清理 Gemini 遠端臨時檔案提示: {e}")
+
+def call_gemini_generate_stream(payload: dict, timeout: int = 240) -> str:
+    """
+    使用 streamGenerateContent?alt=sse 呼叫 Gemini，
+    具備即時流式傳輸能力，徹底防止本地代理伺服器 (Clash/V2Ray) 在長音訊/長影片推理時因空閒超時中斷。
+    """
+    stream_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse&key={GEMINI_KEY}"
+    try:
+        resp = requests.post(stream_url, json=payload, stream=True, proxies=PROXIES, timeout=timeout)
+        if resp.status_code != 200:
+            logging.error(f"Gemini Streaming API 失敗 (HTTP {resp.status_code}): {resp.text[:300]}")
+            return ""
+            
+        collected = []
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            decoded = line.decode('utf-8', errors='ignore')
+            if decoded.startswith('data: '):
+                data_str = decoded[6:].strip()
+                if not data_str or data_str == '[DONE]':
+                    continue
+                try:
+                    c = json.loads(data_str)
+                    candidates = c.get('candidates', [])
+                    if candidates:
+                        parts = candidates[0].get('content', {}).get('parts', [])
+                        for p in parts:
+                            if 'text' in p:
+                                collected.append(p['text'])
+                except Exception:
+                    pass
+                    
+        return "".join(collected).strip()
+    except Exception as e:
+        logging.error(f"Gemini Streaming API 請求異常: {e}")
+        return ""
+
 def download_audio_stream(url: str, output_dir: Path) -> Path:
-    """快速抽取輕量音訊流（限時長 <= 30分鐘或檔案 <= 25MB）"""
+    """快速抽取輕量音訊流（限時長 <= 120分鐘或檔案 <= 150MB）"""
     out_tmpl = str(output_dir / "%(id)s.%(ext)s")
     ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': out_tmpl,
         'quiet': True,
         'no_warnings': True,
-        'max_filesize': 25 * 1024 * 1024
+        'max_filesize': 150 * 1024 * 1024
     }
     if COOKIES_FILE.exists():
         ydl_opts['cookiefile'] = str(COOKIES_FILE)
@@ -461,6 +624,9 @@ def process_video_pipeline(url: str, title_hint: str = None) -> tuple[dict, str,
     智慧多級精讀流水線核心調度
     返回 (info, summary, mode_name, transcript_content)
     """
+    # 0. 防追蹤網址清洗 (Rule 8)
+    url = clean_tracking_url(url)
+    
     # 1. 抓取元數據
     info = get_video_info(url, title_hint=title_hint)
     duration = info.get("duration") or 0
@@ -505,7 +671,7 @@ def process_video_pipeline(url: str, title_hint: str = None) -> tuple[dict, str,
         logging.info("--> [Rule 5] B 站影片無字幕，啟動跨平台 YouTube 同源檢索...")
         yt_match = search_youtube_counterpart(title, duration_sec=duration, proxies=PROXIES)
         if yt_match.get("found"):
-            yt_url = yt_match.get("url")
+            yt_url = clean_tracking_url(yt_match.get("url"))
             yt_title = yt_match.get("title")
             logging.info(f"--> [Rule 5] 找到 YouTube 同源原片: {yt_url} ({yt_title})")
             info["original_url"] = yt_url
@@ -545,26 +711,26 @@ YouTube原片連結：{yt_url}（原片標題：{yt_title}）
                     summary = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
                     return info, summary, f"跨平台 YouTube 同源字幕補全 ({yt_lang})", yt_sub
 
-    # 4. Level 3: 若無字幕且時長 <= 30分鐘，執行語音抽取 + Gemini 原生語音多模態分析
-    if 0 < duration <= 1800:
-        logging.info("--> [流水線] 無外掛字幕，但時長在 30 分鐘內，啟動輕量語音抽取...")
+    # 4. Level 3: 若無字幕且時長 <= 120分鐘 (7200s)，執行語音抽取 + Gemini 原生語音多模態分析與完整逐字稿生成
+    if 0 < duration <= 7200 or duration == 0:
+        logging.info("--> [流水線] 無外掛字幕，但時長在 2 小時內，啟動語音抽取與多模態聽音精讀...")
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = download_audio_stream(url, Path(tmpdir))
             if audio_path and audio_path.exists():
                 file_size_mb = round(audio_path.stat().st_size / 1024 / 1024, 2)
-                logging.info(f"--> [流水線] 音訊抽取完成 ({file_size_mb} MB)，傳遞至 Gemini Flash 進行多模態聽音解析...")
+                logging.info(f"--> [流水線] 音訊抽取完成 ({file_size_mb} MB)，準備傳遞至 Gemini Flash 進行多模態聽音解析與逐字稿生成...")
                 
-                b64_audio = base64.b64encode(audio_path.read_bytes()).decode('utf-8')
                 mime = "audio/mp4" if audio_path.suffix == '.m4a' else f"audio/{audio_path.suffix.replace('.', '')}"
                 
-                prompt = f"""請以資深專業分析師的角度，直接聽取這段完整的音訊，為本影片生成極致深刻、客觀的 Obsidian 筆記條目。
+                prompt = f"""請以資深專業分析師與精確速記員的角度，認真聆聽這段完整的音訊，為本影片生成極致深刻、客觀的 Obsidian 知識庫精讀筆記與完整演講逐字稿。
 必須全部使用繁體中文（台灣正體）。
 
 影片標題：{title}
-時長：{info.get('duration_string', '')} | 頻道/作者：{info.get('uploader', '')}
+影片時長：{info.get('duration_string', '')} | 頻道/作者：{info.get('uploader', '')}
 
-請按以下結構輸出（請勿包含外部代碼塊標記）：
+請嚴格按以下結構輸出，使用明確的標記分隔兩大部分（請勿添加外部代碼塊）：
 
+===SUMMARY===
 ### 核心論點與摘要 (Gemini 原生語音多模態精讀)
 - **1. 關鍵論述**：...
 - **2. 關鍵論述**：...
@@ -572,25 +738,60 @@ YouTube原片連結：{yt_url}（原片標題：{yt_title}）
 
 ### 時間戳與關鍵章節速記 (AI 語音生成)
 - **[00:00]** 開篇主題引入...
-- **[00:00]** 核心轉折或案例剖析...
-- **[00:00]** 總結與核心價值...
+- **[10:00]** 核心轉折或案例剖析...
+- **[20:00]** 總結與核心價值...
 
 ### 深度洞察與分析 (AI 生成)
-- **底層邏輯與啟示**：...
+- **底層架構與關鍵啟發**：...
+
+===TRANSCRIPT===
+## 完整演講整理逐字稿與深度筆記
+（請按時間戳章節詳細忠實整理演講精華逐字稿，涵蓋所有重要討論點與原話論述）
 """
-                payload = {
-                    "contents": [{
-                        "parts": [
-                            {"inline_data": {"mime_type": mime, "data": b64_audio}},
-                            {"text": prompt}
-                        ]
-                    }]
-                }
-                api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_KEY}"
-                resp = requests.post(api_url, json=payload, proxies=PROXIES, timeout=60)
-                if resp.status_code == 200:
-                    summary = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-                    return info, summary, "Gemini 原生語音多模態精讀 (Level 3)", ""
+                uploaded_meta = upload_file_to_gemini(audio_path, mime_type=mime)
+                payload = None
+                if uploaded_meta and uploaded_meta.get("uri"):
+                    payload = {
+                        "contents": [{
+                            "parts": [
+                                {"file_data": {"mime_type": mime, "file_uri": uploaded_meta["uri"]}},
+                                {"text": prompt}
+                            ]
+                        }]
+                    }
+                elif audio_path.stat().st_size <= 15 * 1024 * 1024:
+                    logging.info("--> [流水線] Files API 未取得，改採 Inline Base64 模式傳輸...")
+                    b64_audio = base64.b64encode(audio_path.read_bytes()).decode('utf-8')
+                    payload = {
+                        "contents": [{
+                            "parts": [
+                                {"inline_data": {"mime_type": mime, "data": b64_audio}},
+                                {"text": prompt}
+                            ]
+                        }]
+                    }
+
+                if payload:
+                    try:
+                        logging.info("--> [流水線] 使用 Gemini Streaming 傳輸模式進行即時聽音推理...")
+                        full_reply = call_gemini_generate_stream(payload, timeout=240)
+                        if full_reply:
+                            # 分割 SUMMARY 與 TRANSCRIPT
+                            summary_part = full_reply
+                            transcript_part = ""
+                            if "===TRANSCRIPT===" in full_reply:
+                                parts = full_reply.split("===TRANSCRIPT===", 1)
+                                summary_part = parts[0].replace("===SUMMARY===", "").strip()
+                                transcript_part = parts[1].strip()
+                            elif "===SUMMARY===" in full_reply:
+                                summary_part = full_reply.replace("===SUMMARY===", "").strip()
+
+                            return info, summary_part, "Gemini 原生語音多模態精讀 (Level 3)", transcript_part
+                        else:
+                            logging.warning("Level 3 Gemini 聽音串流未回傳有效文字，準備降級至 Level 1...")
+                    finally:
+                        if uploaded_meta and uploaded_meta.get("name"):
+                            delete_file_from_gemini(uploaded_meta["name"])
 
     # 5. Level 1: 結構化元數據與知識圖譜兜底 (適用於超長視頻或音訊跳過)
     logging.info("--> [流水線] 啟動結構化元數據與大模型知識圖譜精讀...")
@@ -669,6 +870,7 @@ YouTube原片連結：{yt_url}（原片標題：{yt_title}）
 
 def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, transcript_text: str = "", user_comment: str = "") -> str:
     """原子寫入 Obsidian 週度日誌流 (Rule 7)，並強制執行長視頻獨立逐字稿規範 (Rule 3) 與評語記錄 (Rule 6)"""
+    url = clean_tracking_url(url)
     today = datetime.now()
     week_str, start_date_str, end_date_str = get_current_week_info(today)
     today_str = today.strftime("%Y-%m-%d")
@@ -698,8 +900,9 @@ def append_to_vault(url: str, info: dict, ai_summary: str, mode_name: str, trans
     duration = info.get("duration") or 0
     duration_str = info.get("duration_string") or ""
     
-    # 處理 YouTube 原片雙鏈 (Rule 5)
-    original_url_line = f"- [original_url:: {info['original_url']}]\n" if info.get("original_url") else ""
+    # 處理 YouTube 原片雙鏈 (Rule 5 & Rule 8)
+    orig_url = clean_tracking_url(info['original_url']) if info.get("original_url") else ""
+    original_url_line = f"- [original_url:: {orig_url}]\n" if orig_url else ""
     
     # 執行系統規範 3：長視頻（>=20分鐘，即 1200 秒）獨立歸檔逐字稿
     transcript_backlink = ""
